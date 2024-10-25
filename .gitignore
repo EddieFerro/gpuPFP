@@ -1,0 +1,16 @@
+# Ignore output files
+*.txt
+*.out
+
+# Ignore error files
+*.err
+
+# Ignore input files
+*.fa
+*.fasta
+
+# Ignore script files
+*.sh
+
+# Ignore environment files
+*.yml
