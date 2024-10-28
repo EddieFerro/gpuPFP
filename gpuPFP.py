@@ -30,7 +30,7 @@ def trigger_string_finder(sequence, prime, w, p, result):
 #     return hval
 
 
-# GPU string parser function
+# GPU string parser function. Not currently used.
 @cuda.jit
 def dictionary_parser(triggerStrings, w, sequence, phrases, offsets):
     idx = cuda.grid(1)
@@ -90,10 +90,11 @@ def read_fasta(file_path, w, lineLimit=1000000):
 w = 10
 p = 100
 
-startTime = time.time()
-sequences = read_fasta(r"SARS.25k.fa", w)
+
+programStart = startTime = time.time()
+# sequences = read_fasta(r"SARS.25k.fa", w)
 # sequences = read_fasta(r"sequences.fasta", w)
-# sequences = read_fasta(r"sequence.fasta", w)
+sequences = read_fasta(r"/blue/boucher/eferro1/analysis/fasta/Chr21.10.reheader_consensus.fasta", w)
 endTime = time.time()
 print(f"Execution Time for reading file: {endTime - startTime:.4f}")
 
@@ -104,20 +105,21 @@ parse = cudf.Series(dtype='int64')
 
 print(f"Number of sequences to process: {len(sequences)}\n")
 
+count = 0
 for sequence in sequences:
-
+    count += 1
+    print(f"Sequence: {count}")
     startTime = time.time()
     # This has been accurate so far, double check
     num_windows = len(sequence) - w + 1
 
     # Turn the sequence into ints for finding trigger string (rolling hash)
-    sequenceAsInt = cp.array([ord(c) for c in sequence], dtype=cp.uint8)
+    sequenceAsInt = cp.array(bytearray(sequence.encode('utf-8')), dtype=cp.uint8)
     # Turn sequence into byte array for parsing on GPU
-    sequenceAsChar = cp.array(bytearray(sequence.encode('utf-8')), dtype=cp.uint8)
+    # sequenceAsChar = cp.array(bytearray(sequence.encode('utf-8')), dtype=cp.uint8)
 
-    # Store results for trigger string finding. Cupy array prefilled with 0s based on num windows, stored as Series for later processing.
-    # .values gives the cupy array from inside series to pass into GPU
-    result = cudf.Series(cp.zeros(num_windows, dtype=cp.uint8))
+    # Store results for trigger string finding. Cupy array prefilled with 0s based on num windows.
+    result = cp.zeros(num_windows, dtype=cp.uint8)
     endTime = time.time()
     print(f"Execution Time for trigger string preprocess: {endTime - startTime:.4f}")
 
@@ -126,17 +128,17 @@ for sequence in sequences:
     blocks_per_grid = (num_windows + threads_per_block - 1) // threads_per_block
 
     # Call to trigger string finder GPU function, maybe generate prime (31) randomly every time program is called.
-    startTime = time.time()
-    trigger_string_finder[blocks_per_grid, threads_per_block](sequenceAsInt, 31, w, p, result.values)
+    startTime = endTime
+    trigger_string_finder[blocks_per_grid, threads_per_block](sequenceAsInt, 31, w, p, result)
     endTime = time.time()
     print(f"Execution Time for trigger string GPU: {endTime - startTime:.4f}")
 
     # Find all positions at which there is a trigger string. The index in the result matches up to the start position of the trigger string in the seq.
     # Basically, if result[i] == 1, then seq[i:i+w] is the trigger string.
-    startTime = time.time()
-    triggerStrings = result[result == 1].index
+    startTime = endTime
+    triggerStrings = cp.where(result == 1)[0]
     endTime = time.time()
-    print(f"Execution Time for triggeString position post processing: {endTime - startTime:.4f}")
+    print(f"Execution Time for trigger string positions post processing: {endTime - startTime:.4f}")
 
     # Need to determine some values so we can create an n x m array of the necessary size, where n is num trigger strings and m is longest phrase for the GPU since dynamic allocation doesnt work :(
     # Num of phrases is easy. Maximum length is the longest distance between trigger string starts + w.
@@ -151,19 +153,19 @@ for sequence in sequences:
         # d_phrases = cp.full((num_phrases, max_len), 255, dtype=cp.uint8)
         # d_phrases = cp.empty((num_phrases, max_len), dtype=cp.uint8)
         # offsets = cp.empty(num_phrases, dtype=cp.uint64)
-        
-
 
         # Need to figure out how to best determine threads per block, etc. ###############################################
         threads_per_block = 128
         blocks_per_grid = (num_phrases + (threads_per_block - 1)) // threads_per_block
 
         # Call to phrase parser GPU function.
-        startTime = time.time()
+        startTime = endTime
         # dictionary_parser[blocks_per_grid, threads_per_block](triggerStrings.values, w, sequenceAsChar, d_phrases, offsets)
         phrases = []
+        triggerStrings = triggerStrings.get()
         for i in range(num_phrases):
             phrases.append(sequence[triggerStrings[i]:triggerStrings[i+1]+w])
+        phrases_series = cudf.Series(phrases)
         endTime = time.time()
         print(f"Execution Time for phrase parsing CPU: {endTime - startTime:.4f}")
         # print(d_phrases.get())
@@ -174,32 +176,30 @@ for sequence in sequences:
         # # phrases_series = cudf.Series(cudf.DataFrame.from_records(d_phrases).apply(lambda row: row.str.cat(sep=''), axis=1))
         # endTime = time.time()
         # print(f"Execution Time for turning phrases to strings: {endTime - startTime:.2f}")
-
-        phrases_series = cudf.Series(phrases)
         # print(phrases_series)
         # del d_phrases
     else:
         phrases_series = cudf.Series([sequence])
 
     # Hashes the phrases with murmurhash3 using cudf built-in function and outputs a series of hashes. Also create dict for curr seq
-    startTime = time.time()
+    startTime = endTime
     curr_parse = phrases_series.hash_values()
     curr_dict = cudf.DataFrame({'phrases': phrases_series, 'hashes': curr_parse})
     endTime = time.time()
     print(f"Execution Time for hashing phrases & creating dict: {endTime - startTime:.4f}")
     
     # Combine the dict and parse from curr seq to the final, preserving order for the parse and removing duplicates from the dict.
-    startTime = time.time()
+    startTime = endTime
     parse = cudf.concat([parse, curr_parse], ignore_index=True)
     endTime = time.time()
     print(f"Execution Time for concat parse: {endTime - startTime:.4f}")
 
-    startTime = time.time()
+    startTime = endTime
     dict = cudf.concat([dict, curr_dict], ignore_index=True)
     endTime = time.time()
     print(f"Execution Time for concat dict: {endTime - startTime:.4f}")
 
-    startTime = time.time()
+    startTime = endTime
     dict = dict.drop_duplicates(subset=['hashes']).reset_index(drop=True)
     endTime = time.time()
     print(f"Execution Time for keeping unique dict values: {endTime - startTime:.4f}")
@@ -214,19 +214,19 @@ for sequence in sequences:
     print("\n\n")
 
 # Final step is to sort the dictionary, create a mapping to replace hashes with indices in the parse, then drop hashes from dict.
-startTime = time.time()
+startTime = endTime
 dict = dict.sort_values(by='phrases', ignore_index=True)
 endTime = time.time()
 print(f"Execution Time for sorting dict: {endTime - startTime:.4f}")
 
-startTime = time.time()
+startTime = endTime
 mapping = cudf.Series(dict.index, index=dict['hashes'])
 endTime = time.time()
 print(f"Execution Time for creating mapping: {endTime - startTime:.4f}")
 
 dict = dict.drop(columns=['hashes'])
 
-startTime = time.time()
+startTime = endTime
 parse = parse.map(mapping)
 endTime = time.time()
 print(f"Execution Time for applying mapping: {endTime - startTime:.4f}")
@@ -239,8 +239,8 @@ with open('dict.txt', 'w', encoding='utf-8') as file:
 with open('parse.txt', 'w', encoding='utf-8') as file:
     file.write(parse.to_string())
 endTime = time.time()
-print(f"Write time: {endTime - startTime:.4f}")
+print(f"Write time: {endTime - startTime:.4f}\n\n")
 
-
+print(f"Total program runtime:{endTime - programStart:.4f}")
 
 # cudf.core.column.as_column(d_phrases.ravel(), dtype="str")

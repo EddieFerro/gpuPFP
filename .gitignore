@@ -1,6 +1,8 @@
 # Ignore output files
 *.txt
 *.out
+*.dict
+*.parse
 
 # Ignore error files
 *.err
