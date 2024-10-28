@@ -92,9 +92,9 @@ p = 100
 
 
 programStart = startTime = time.time()
-# sequences = read_fasta(r"SARS.25k.fa", w)
+sequences = read_fasta(r"SARS.25k.fa", w)
 # sequences = read_fasta(r"sequences.fasta", w)
-sequences = read_fasta(r"/blue/boucher/eferro1/analysis/fasta/Chr21.10.reheader_consensus.fasta", w)
+# sequences = read_fasta(r"Chr21.10.reheader_consensus.fasta", w)
 endTime = time.time()
 print(f"Execution Time for reading file: {endTime - startTime:.4f}")
 
