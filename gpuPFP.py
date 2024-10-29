@@ -8,14 +8,11 @@ import time
 def trigger_string_finder(sequence, prime, w, p, result):
     idx = cuda.grid(1)
     start = idx
-    allSpecial = True
     if start + w <= sequence.size:
         hash_val = 0
         for i in range(w):
-            if sequence[start + i] > 5:
-                allSpecial = False
             hash_val = (hash_val * prime + sequence[start + i]) & 0xFFFFFFFF
-        if hash_val % p == 0 or allSpecial:
+        if hash_val % p == 0 or start == 0 or start+w == sequence.size:
             result[idx] = 1
 
 
