@@ -3,6 +3,7 @@
 *.out
 *.dict
 *.parse
+*.log
 
 # Ignore error files
 *.err
@@ -16,3 +17,7 @@
 
 # Ignore environment files
 *.yml
+
+# Ignore folders
+experiments/
+testing/
