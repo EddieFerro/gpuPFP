@@ -1,9 +1,9 @@
 import cupy as cp
 from numba import cuda
-import cudf
-import time
 import rmm
 import rmm.statistics
+import cudf
+import time
 import shutil
 import gc
 import glob
@@ -13,13 +13,14 @@ import os
 from rmm.allocators.cupy import rmm_cupy_allocator
 from rmm.allocators.numba import RMMNumbaManager
 import pylibcudf as plc
-
-
 free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
+# rmm.reinitialize(pool_allocator=True)
 print(f"GPU memory (CuPy): {free_bytes/1e9:.2f} GB free / {total_bytes/1e9:.2f} GB total")
-# pool = rmm.mr.PoolMemoryResource(rmm.mr.CudaMemoryResource(),initial_pool_size=f"{(total_bytes)/1e9:.2f} GiB", maximum_pool_size=f"{(total_bytes)/1e9:.2f} GiB")
-# rmm.mr.set_current_device_resource(pool)
-rmm.reinitialize(pool_allocator=True)
+# pool = rmm.mr.PoolMemoryResource(rmm.mr.CudaAsyncMemoryResource())
+pool = rmm.mr.CudaAsyncMemoryResource()
+# rmm.mr.PoolMemoryResource(rmm.mr.CudaAsyncMemoryResource())
+rmm.mr.set_current_device_resource(pool)
+
 rmm.statistics.enable_statistics()
 cudf.set_option("memory_profiling", True)
 cuda.set_memory_manager(RMMNumbaManager)
@@ -119,9 +120,6 @@ def read_fasta(file_path, w, lineLimit=1000000):
         file.close()        
 
 def batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount):
-    current_bytes = rmm.statistics.get_statistics().current_bytes
-    print(f"Current bytes batch start:{current_bytes}")
-    cudf.utils.performance_tracking.print_memory_report()
     # start = time.time()
     seq_arr = cp.concatenate(phrase_chunks)
     offsets_arr = cp.concatenate(offset_chunks)
@@ -148,10 +146,6 @@ def batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount):
         children=[offsets_column]
     )
     phrases_series = cudf.Series.from_pylibcudf(strings_column)
-    del seq_arr
-    del offsets_arr
-    del offsets_column
-    del strings_column
     # end = time.time()
     # print(f"Create cudf string series batch:{end - start:.4f}")
 
@@ -164,7 +158,6 @@ def batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount):
     dictionary = cudf.DataFrame({'phrases': phrases_series, 'hashes': parse})
     # end = time.time()
     # print(f"Create dataframe batch:{end - start:.4f}")
-    del phrases_series
 
     # start = time.time()
     dictionary = dictionary.drop_duplicates(subset=['hashes']).reset_index(drop=True)
@@ -175,41 +168,37 @@ def batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount):
     # start = time.time()
     parse = parse.to_frame(name="parse")
     parse.to_parquet(f"{tmp_path}/parse/{tempFileCount}.parquet")
-    del parse
-    gc.collect()
     dictionary.to_parquet(f"{tmp_path}/dict/{tempFileCount}.parquet")
     # end = time.time()
     # print(f"Write temp files to parquet:{end - start:.4f}")
-    del dictionary
 
-def build_dict(tmp_path):
-    # start = time.time()
-    dictionary = cudf.read_parquet(f"{tmp_path}/dict/")
-    # end = time.time()
-    # print(f"Read dict temp files to dataframe:{end - start:.4f}")
 
-    # start = time.time()
-    dictionary = dictionary.drop_duplicates(subset=['hashes']).reset_index(drop=True)
-    # end = time.time()
-    # print(f"Drop duplicates from dict batch:{end - start:.4f}")
+def build_dict(tmp_path, batch_size=2):
+    dict_dir = os.path.join(tmp_path, "dict")
+    all_files = sorted(glob.glob(os.path.join(dict_dir, "*.parquet")))
+    dictionary = cudf.DataFrame({"phrases": cudf.Series(dtype="str"),
+                                 "hashes":  cudf.Series(dtype="int64")})
 
-    # start = time.time()
-    dictionary = dictionary.sort_values(by='phrases', ignore_index=True)
-    # end = time.time()
-    # print(f"Sort full dict:{end - start:.4f}")
+    # process in batches
+    for i in range(0, len(all_files), batch_size):
+        batch_files = all_files[i : i + batch_size]
+        # read 1..batch_size files in one call
+        df_batch = cudf.read_parquet(batch_files)
+        # append
+        dictionary = cudf.concat([dictionary, df_batch], ignore_index=True)
+        # drop any duplicates seen so far
+        dictionary = dictionary.drop_duplicates(subset=["hashes"])\
+                               .reset_index(drop=True)
+        # delete the on-disk chunks
+        for f in batch_files:
+            os.remove(f)
 
-    # start = time.time()
-    mapping = cudf.Series(dictionary.index, index=dictionary['hashes'])
-    # end = time.time()
-    # print(f"Create mapping:{end - start:.4f}")
-
-    # start = time.time()
-    dictionary = dictionary.drop(columns=['hashes'])
-    # end = time.time()
-    # print(f"Drop Column:{end - start:.4f}")
-
-    for path in glob.glob(f"{tmp_path}/dict/*.parquet"):
-        os.remove(path)
+    # final sort by phrase text
+    dictionary = dictionary.sort_values(by="phrases", ignore_index=True)
+    # build the final mapping: hash → row index
+    mapping = cudf.Series(dictionary.index, index=dictionary["hashes"])
+    # drop the hashes column from the output dict
+    dictionary = dictionary.drop(columns=["hashes"])
 
     return dictionary, mapping
 
@@ -225,9 +214,9 @@ def gpuPFP(input, w, p, tmp_path):
 
     programStart = time.time()
     for sequence in read_fasta(input, w):
-        current_bytes = rmm.statistics.get_statistics().current_bytes
-        print(f"Current bytes Start:{current_bytes}")
-        cudf.utils.performance_tracking.print_memory_report()
+        if cum_offset == 0:
+            phrase_chunks.clear()
+            offset_chunks.clear()
         seq_len = len(sequence)
 
         # Turn the sequence into ints for finding trigger string (rolling hash)
@@ -235,7 +224,6 @@ def gpuPFP(input, w, p, tmp_path):
         sequenceAsInt = cp.array(sequence, dtype=cp.uint8)
         # end = time.time()
         # print(f"Copy one sequence to device:{end - start:.4f}")
-
         del sequence
 
         # Store results for trigger string finding. Cupy array prefilled with 0s based on num windows.
@@ -273,10 +261,7 @@ def gpuPFP(input, w, p, tmp_path):
             output = cp.empty(output_len, dtype=cp.uint8)
             # end = time.time()
             # print(f"Sequence expander setup:{end - start:.4f}")
-            # print(sequenceAsInt.get())
-            # print(shifts.get())
-            # print(result.get())
-            # print(triggerStrings.get())
+
             blocks_per_grid = (seq_len + (threads_per_block - 1)) // threads_per_block
             # start = time.time()
             sequence_expander[blocks_per_grid, threads_per_block](sequenceAsInt, result, shifts, w, output)
@@ -290,48 +275,31 @@ def gpuPFP(input, w, p, tmp_path):
             offsets += cum_offset
             offset_chunks.append(offsets.astype(cp.int32))
             cum_offset += output.size
-
-            del triggerStrings
-            del offsets
-            del result
-            del shifts
-            del output
         else:
             phrase_chunks.append(sequenceAsInt)
             offsets = cp.array([0, sequenceAsInt.size], dtype=cp.int32)
             offsets += cum_offset
             offset_chunks.append(offsets.astype(cp.int32))
             cum_offset += sequenceAsInt.size
-            del offsets
-        del sequenceAsInt
         current_bytes = rmm.statistics.get_statistics().current_bytes
         if current_bytes/total_bytes > 0.10:
-            print(f"Current bytes before dump:{current_bytes}")
-            cudf.utils.performance_tracking.print_memory_report()
             tempFileCount += 1
             batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount)
-            phrase_chunks.clear()
-            offset_chunks.clear()
             cum_offset = 0
-            gc.collect()
 
     if tempFileCount > 0:
         if phrase_chunks:
             tempFileCount += 1
             batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount)
             cum_offset = 0
-            del phrase_chunks
-            del offset_chunks
-        gc.collect()
         dictionary, mapping = build_dict(tmp_path)
-        gc.collect()
+        endTime = time.time()
+        print(f"Total program runtime:{endTime - programStart:.4f}")
         return dictionary, None, tempFileCount, mapping
     else:
         # start = time.time()
         seq_arr = cp.concatenate(phrase_chunks)
         offsets_arr = cp.concatenate(offset_chunks)
-        del phrase_chunks
-        del offset_chunks
         # end = time.time()
         # print(f"Concatenate char and offset arrays:{end - start:.4f}")
 
@@ -355,10 +323,6 @@ def gpuPFP(input, w, p, tmp_path):
             children=[offsets_column]
         )
         phrases_series = cudf.Series.from_pylibcudf(strings_column)
-        del seq_arr
-        del offsets_arr
-        del offsets_column
-        del strings_column
         # end = time.time()
         # print(f"Create cudf string series batch:{end - start:.4f}")
 
@@ -371,7 +335,7 @@ def gpuPFP(input, w, p, tmp_path):
         dictionary = cudf.DataFrame({'phrases': phrases_series, 'hashes': parse})
         # end = time.time()
         # print(f"Create dataframe batch:{end - start:.4f}")
-        del phrases_series
+        # del phrases_series
 
         # start = time.time()
         dictionary = dictionary.drop_duplicates(subset=['hashes']).reset_index(drop=True)
@@ -453,7 +417,6 @@ def main():
     with open(f"{output_prefix}.dict", "r+b") as f:
         f.seek(-1, os.SEEK_END)  # back up one byte from EOF
         f.truncate()       
-    gc.collect()
     del dictionary
     # end = time.time()
     # print(f"Write dictionary:{end - start:.4f}")
