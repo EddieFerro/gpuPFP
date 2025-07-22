@@ -13,14 +13,10 @@ import os
 from rmm.allocators.cupy import rmm_cupy_allocator
 from rmm.allocators.numba import RMMNumbaManager
 import pylibcudf as plc
-free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
-rmm.reinitialize(pool_allocator=True)
-print(f"GPU memory (CuPy): {free_bytes/1e9:.2f} GB free / {total_bytes/1e9:.2f} GB total")
-# pool = rmm.mr.PoolMemoryResource(rmm.mr.CudaAsyncMemoryResource())
-# pool = rmm.mr.CudaAsyncMemoryResource()
-# rmm.mr.PoolMemoryResource(rmm.mr.CudaAsyncMemoryResource())
-# rmm.mr.set_current_device_resource(pool)
 
+free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
+pool = rmm.mr.CudaAsyncMemoryResource()
+rmm.mr.set_current_device_resource(pool)
 rmm.statistics.enable_statistics()
 cudf.set_option("memory_profiling", True)
 cuda.set_memory_manager(RMMNumbaManager)
@@ -59,7 +55,6 @@ def sequence_expander(sequence, positions, shifts, w, output):
 # Will need a better method for reading fasta file probably. Maybe read one sequence at a time with yield in main.
 # Written by Tyler Pencinger
 def read_fasta(file_path, w, lineLimit=1000000):
-        # Reads a FASTA file and return a list of sequences
         firstSeq = True
         byteCount = 0
         total_time = 0
@@ -71,7 +66,6 @@ def read_fasta(file_path, w, lineLimit=1000000):
         else:
             file = open(file_path, 'r')
 
-        # with open(file_path, 'r') as file:
         start = time.time()
 
         buffer = bytearray()
@@ -79,20 +73,6 @@ def read_fasta(file_path, w, lineLimit=1000000):
             line = line.strip()
             if line.startswith('>'):
                 continue
-                # if buffer:
-                #     start_pad = bytearray(b'\x01' * w) if firstSeq else bytearray(b'\x02' * w)
-                #     end_pad = bytearray(b'\x02' * w)
-		
-                #     end = time.time()
-                #     print(f"Read one sequence runtime:{end - start:.4f}")
-		
-                #     yield start_pad + buffer + end_pad
-		
-                #     start = time.time()
-		
-                #     buffer.clear()
-                #     byteCount = 0
-                #     firstSeq = False
             buffer.extend(line.encode('utf-8'))
             byteCount += len(line)
             if byteCount >= 524288000:
@@ -122,13 +102,9 @@ def read_fasta(file_path, w, lineLimit=1000000):
         file.close()        
 
 def batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount):
-    # start = time.time()
     seq_arr = cp.concatenate(phrase_chunks)
     offsets_arr = cp.concatenate(offset_chunks)
-    # end = time.time()
-    # print(f"Concatenate char and offset arrays:{end - start:.4f}")
 
-    # start = time.time()
     offsets_column = plc.Column(
         data_type=plc.DataType(plc.TypeId.INT32),
         size=offsets_arr.size,
@@ -148,59 +124,38 @@ def batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount):
         children=[offsets_column]
     )
     phrases_series = cudf.Series.from_pylibcudf(strings_column)
-    # end = time.time()
-    # print(f"Create cudf string series batch:{end - start:.4f}")
 
-    # start = time.time()
-    parse = phrases_series.hash_values(method="xxhash64")
-    # end = time.time()
-    # print(f"Hash values batch:{end - start:.4f}")
-
-    # start = time.time()
-    dictionary = cudf.DataFrame({'phrases': phrases_series, 'hashes': parse})
-    # end = time.time()
-    # print(f"Create dataframe batch:{end - start:.4f}")
-
-    # start = time.time()
-    dictionary = dictionary.drop_duplicates(subset=['hashes']).reset_index(drop=True)
-    # end = time.time()
-    # print(f"Drop duplicates from dict batch:{end - start:.4f}")
-
-    # print("File dump.")
-    # start = time.time()
-    parse = parse.to_frame(name="parse")
+    parse = cudf.DataFrame({'phrases': phrases_series})
     parse.to_parquet(f"{tmp_path}/parse/{tempFileCount}.parquet")
+
+    dictionary = parse.drop_duplicates(subset='phrases').reset_index(drop=True)
     dictionary.to_parquet(f"{tmp_path}/dict/{tempFileCount}.parquet")
-    # end = time.time()
-    # print(f"Write temp files to parquet:{end - start:.4f}")
+  
 
 
 def build_dict(tmp_path, batch_size=1):
     dict_dir = os.path.join(tmp_path, "dict")
     all_files = sorted(glob.glob(os.path.join(dict_dir, "*.parquet")))
-    dictionary = cudf.DataFrame({"phrases": cudf.Series(dtype="str"), "hashes":  cudf.Series(dtype="int64")})
+    dictionary = cudf.DataFrame({"phrases": cudf.Series(dtype="str")})
 
     # process in batches
     for i in range(0, len(all_files), batch_size):
         batch_files = all_files[i : i + batch_size]
-        # read 1..batch_size files in one call
+
         df_batch = cudf.read_parquet(batch_files)
-        # append
+
         dictionary = cudf.concat([dictionary, df_batch], ignore_index=True)
-        # drop any duplicates seen so far
-        dictionary = dictionary.drop_duplicates(subset=["hashes"]).reset_index(drop=True)
-        # delete the on-disk chunks
+
+        dictionary = dictionary.drop_duplicates(subset='phrases').reset_index(drop=True)
+
         for f in batch_files:
             os.remove(f)
 
-    # final sort by phrase text
+    dictionary = dictionary.drop_duplicates(subset='phrases').reset_index(drop=True)
     dictionary = dictionary.sort_values(by="phrases", ignore_index=True)
-    # build the final mapping: hash → row index
-    mapping = cudf.Series(dictionary.index, index=dictionary["hashes"])
-    # drop the hashes column from the output dict
-    dictionary = dictionary.drop(columns=["hashes"])
+    dictionary = dictionary.reset_index(drop=False)
 
-    return dictionary, mapping
+    return dictionary, None
 
 def gpuPFP(input, w, p, tmp_path, threshold):
     
@@ -208,9 +163,6 @@ def gpuPFP(input, w, p, tmp_path, threshold):
     phrase_chunks = []
     offset_chunks = []
     cum_offset = 0
-    
-    # dictionary = cudf.DataFrame({'phrases': cudf.Series(dtype='str'), 'hashes': cudf.Series(dtype='int64')})
-    # parse = cudf.Series(dtype='int32')
 
     programStart = time.time()
     for sequence in read_fasta(input, w):
@@ -219,37 +171,20 @@ def gpuPFP(input, w, p, tmp_path, threshold):
             offset_chunks.clear()
         seq_len = len(sequence)
 
-        # Turn the sequence into ints for finding trigger string (rolling hash)
-        # start = time.time()
         sequenceAsInt = cp.array(sequence, dtype=cp.uint8)
-        # end = time.time()
-        # print(f"Copy one sequence to device:{end - start:.4f}")
         del sequence
 
-        # Store results for trigger string finding. Cupy array prefilled with 0s based on num windows.
         result = cp.zeros(seq_len, dtype=cp.uint8)
 
         threads_per_block = 128
         blocks_per_grid = (seq_len + threads_per_block - 1) // threads_per_block
-
-        # Call to trigger string finder GPU function, maybe generate prime (31) randomly every time program is called.
-        # start = time.time()
         trigger_string_finder[blocks_per_grid, threads_per_block](sequenceAsInt, 31, w, p, result)
-        # end = time.time()
-        # print(f"Trigger String finder one sequence:{end - start:.4f}")
 
-        # Find all positions at which there is a trigger string. The index in the result matches up to the start position of the trigger string in the seq.
-        # start = time.time()
         triggerStrings = cp.where(result == w)[0]
-        # end = time.time()
-        # print(f"Cupy where function timing:{end - start:.4f}")
         num_phrases = triggerStrings.size - 1
 
-        # Get the phrases using trigger string positions
-        # Blows up GPU memory currently
         if num_phrases > 1:
             # Reset so that beginning and end isnt duplicated by kernel
-            # start = time.time()
             result[0] = 0
             result[-w] = 0
             # Get the shift for each character based on expansion
@@ -259,16 +194,9 @@ def gpuPFP(input, w, p, tmp_path, threshold):
             output_len = seq_len + int(temp[-1])
             del temp
             output = cp.empty(output_len, dtype=cp.uint8)
-            # end = time.time()
-            # print(f"Sequence expander setup:{end - start:.4f}")
 
             blocks_per_grid = (seq_len + (threads_per_block - 1)) // threads_per_block
-            # start = time.time()
             sequence_expander[blocks_per_grid, threads_per_block](sequenceAsInt, result, shifts, w, output)
-            # end = time.time()
-            # print(f"Sequence expander one sequence:{end - start:.4f}")
-            # print(offsets.get())
-            # print(output.get())
 
             phrase_chunks.append(output)
             offsets = triggerStrings + cp.arange(triggerStrings.size) * w
@@ -293,18 +221,18 @@ def gpuPFP(input, w, p, tmp_path, threshold):
             tempFileCount += 1
             batch_process(phrase_chunks, offset_chunks, tmp_path, tempFileCount)
             cum_offset = 0
+
         dictionary, mapping = build_dict(tmp_path)
+
         endTime = time.time()
         print(f"Total program runtime:{endTime - programStart:.4f}")
-        return dictionary, None, tempFileCount, mapping
+
+        return dictionary, None, tempFileCount
+    
     else:
-        # start = time.time()
         seq_arr = cp.concatenate(phrase_chunks)
         offsets_arr = cp.concatenate(offset_chunks)
-        # end = time.time()
-        # print(f"Concatenate char and offset arrays:{end - start:.4f}")
 
-        # start = time.time()
         offsets_column = plc.Column(
             data_type=plc.DataType(plc.TypeId.INT32),
             size=offsets_arr.size,
@@ -324,45 +252,18 @@ def gpuPFP(input, w, p, tmp_path, threshold):
             children=[offsets_column]
         )
         phrases_series = cudf.Series.from_pylibcudf(strings_column)
-        # end = time.time()
-        # print(f"Create cudf string series batch:{end - start:.4f}")
 
-        # start = time.time()
-        parse = phrases_series.hash_values(method="xxhash64")
-        # end = time.time()
-        # print(f"Hash values batch:{end - start:.4f}")
+        parse = cudf.DataFrame({'phrases': phrases_series})
 
-        # start = time.time()
-        dictionary = cudf.DataFrame({'phrases': phrases_series, 'hashes': parse})
-        # end = time.time()
-        # print(f"Create dataframe batch:{end - start:.4f}")
-        # del phrases_series
-
-        # start = time.time()
-        dictionary = dictionary.drop_duplicates(subset=['hashes']).reset_index(drop=True)
-        # end = time.time()
-        # print(f"Drop duplicates from dict batch:{end - start:.4f}")
-
-        # start = time.time()
+        dictionary = parse.drop_duplicates(subset='phrases').reset_index(drop=True)
         dictionary = dictionary.sort_values(by='phrases', ignore_index=True)
-        # end = time.time()
-        # print(f"Sort full dict:{end - start:.4f}")
+        dictionary = dictionary.reset_index(drop=False)
 
-        # start = time.time()
-        mapping = cudf.Series(dictionary.index, index=dictionary['hashes'])
-        # end = time.time()
-        # print(f"Create mapping:{end - start:.4f}")
-
-        # start = time.time()
-        dictionary = dictionary.drop(columns=['hashes'])
-        # end = time.time()
-        # print(f"Drop Column:{end - start:.4f}")
         endTime = time.time()
         print(f"Total program runtime:{endTime - programStart:.4f}")
-        return dictionary, parse, tempFileCount, mapping
+
+        return dictionary, parse, tempFileCount
     
-    # # return dict, parse, tempFileCount, hashes, ranks
-    # return dictionary, parse, tempFileCount, mapping
 
 def get_file_prefix(filepath):
 
@@ -375,15 +276,13 @@ def get_file_prefix(filepath):
     
     return name
 
-# Add comprehensive timer option
-
 def main():
     parser = argparse.ArgumentParser(description="Placeholder Description", formatter_class=argparse.RawTextHelpFormatter)
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument('-f', '--fasta', help="path to input fasta file",type=str)
     input_group.add_argument('-t', '--text', help="path to input text file",type=str)
-    parser.add_argument('-w', '--wsize', help="sliding window size", default=15, type=int)
-    parser.add_argument('-p', '--mod', help="hash modulus", default=100, type=int)
+    parser.add_argument('-w', '--wsize', help="sliding window size", default=5, type=int)
+    parser.add_argument('-p', '--mod', help="hash modulus", default=15, type=int)
     parser.add_argument('-o', '--output', help="output files prefix", type=str)
     parser.add_argument('-d', '--tmp', default="tmp", help="directory for temporary files", type=str)
     parser.add_argument('-l', '--limit', default=0.10, help="GPU memory threshold for sequence processing", type=float)
@@ -405,54 +304,41 @@ def main():
     else:
         output_prefix = args.output
 
-    # dict, parse, tempFileCount, hashes, ranks = gpuPFP(file, args.wsize, args.mod)
-    dictionary, parse, tempFileCount, mapping = gpuPFP(file, args.wsize, args.mod, args.tmp, args.limit)
-
-    # start = time.time()
-    dictionary[['phrases']].to_csv(
-        f"{output_prefix}.dict",
-        index=False,        # no index column
-        header=False,       # no header row
-        sep=",",            # unused (single column → no commas)
-        lineterminator="\x03"
-    )
-    with open(f"{output_prefix}.dict", "r+b") as f:
-        f.seek(-1, os.SEEK_END)  # back up one byte from EOF
-        f.truncate()       
-    del dictionary
-    # end = time.time()
-    # print(f"Write dictionary:{end - start:.4f}")
+    dictionary, parse, tempFileCount = gpuPFP(file, args.wsize, args.mod, args.tmp, args.limit)
 
 
-    # start = time.time()
     with open(output_prefix + '.parse', 'wb') as fh:
         if parse is not None:
-            ranks64 = parse.map(mapping)
-            ranks32 = ranks64.astype('uint32').to_cupy()  # now each element is 4 bytes
+            ranks64 = parse[["phrases"]].merge(dictionary, on=["phrases"])
+            ranks32 = ranks64['index'].astype('uint32').to_cupy()
             ranks32.tofile(fh)
         else:
             for i in range(1, tempFileCount + 1):
-                # Read back this chunk from Parquet:
                 temp_df = cudf.read_parquet(f"{args.tmp}/parse/{i}.parquet")
-                # temp_df["parse"] is int64 (the hash in that chunk)
-                # Map → its “rank” via our mapping Series
-                ranks64 = temp_df["parse"].map(mapping)
-                ranks32 = ranks64.astype('uint32').to_cupy()
-
-                # Write the little-endian 4-byte reps for this chunk
+                ranks64 = temp_df[["phrases"]].merge(dictionary, on=["phrases"])
+                ranks32 = ranks64['index'].astype('uint32').to_cupy()
                 ranks32.tofile(fh)
-
-                # Delete the temp file immediately
                 os.remove(f"{args.tmp}/parse/{i}.parquet")
-        # print(rmm.statistics.get_statistics())
-
-        
         fh.close()
+
+
+    dictionary[['phrases']].to_csv(
+        f"{output_prefix}.dict",
+        index=False,        
+        header=False,       
+        sep=",",            
+        lineterminator="\x03"
+    )
+    with open(f"{output_prefix}.dict", "r+b") as f:
+        f.seek(-1, os.SEEK_END)  
+        f.truncate()       
+    del dictionary
+
     print(f"Peak VRAM Bytes:{rmm.statistics.get_statistics().peak_bytes}")
-    # end = time.time()
-    # print(f"Write parse:{end - start:.4f}")
-    # shutil.rmtree(args.tmp)
+
 
 
 if __name__ == '__main__':
     main()
+
+
