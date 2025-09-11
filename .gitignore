@@ -15,8 +15,8 @@
 # Ignore script files
 *.sh
 
-# Ignore environment files
-*.yml
+# Ignore testing files
+reconstruct.py
 
 # Ignore folders
 experiments/
