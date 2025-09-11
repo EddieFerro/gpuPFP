@@ -4,25 +4,31 @@ import rmm
 import rmm.statistics
 import cudf
 import time
-import shutil
-import gc
 import glob
 import gzip
 import argparse
+import sys
 import os
 from rmm.allocators.cupy import rmm_cupy_allocator
 from rmm.allocators.numba import RMMNumbaManager
 import pylibcudf as plc
 
-free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
-pool = rmm.mr.CudaAsyncMemoryResource()
-rmm.mr.set_current_device_resource(pool)
-rmm.statistics.enable_statistics()
-cudf.set_option("memory_profiling", True)
-cuda.set_memory_manager(RMMNumbaManager)
-cp.cuda.set_allocator(rmm_cupy_allocator)
+free_bytes = None
+total_bytes = None
 
-
+def gpu_setup():
+    global free_bytes, total_bytes
+    try:
+        free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
+        pool = rmm.mr.CudaAsyncMemoryResource()
+        rmm.mr.set_current_device_resource(pool)
+        rmm.statistics.enable_statistics()
+        cudf.set_option("memory_profiling", True)
+        cuda.set_memory_manager(RMMNumbaManager)
+        cp.cuda.set_allocator(rmm_cupy_allocator)
+    except cp.cuda.runtime.CUDARuntimeError:
+        print("ERROR: No NVIDIA GPU detected or CUDA not available.")
+        sys.exit(1)
 
 #identify all trigger strings in the sequence
 @cuda.jit
@@ -271,13 +277,13 @@ def get_file_prefix(filepath):
 
     name, ext = os.path.splitext(filename)
     
-    if ext in ['.gz', '.bz2', '.xz']:
+    if ext in ['.gz']:
         name, _ = os.path.splitext(name)
     
     return name
 
 def main():
-    parser = argparse.ArgumentParser(description="Placeholder Description", formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(description="GPU-Accelerated PFP", formatter_class=argparse.RawTextHelpFormatter)
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument('-f', '--fasta', help="path to input fasta file",type=str)
     input_group.add_argument('-t', '--text', help="path to input text file",type=str)
@@ -289,6 +295,8 @@ def main():
 
     args = parser.parse_args()
     
+    gpu_setup()
+
     if not args.fasta:
         file = args.text
     else:
