@@ -35,12 +35,12 @@ usage: gpuPFP.py [-h] (-f FASTA | -t TEXT) [-w WSIZE] [-p MOD] [-o OUTPUT] [-d T
 GPU-Accelerated PFP
 
 options:
-  -h, --help                  show this help message and exit
-  -f FASTA, --fasta FASTA     path to input fasta file
-  -t TEXT, --text TEXT        path to input text file
-  -w WSIZE, --wsize WSIZE     sliding window size
-  -p MOD, --mod MOD           hash modulus
-  -o OUTPUT, --output OUTPUT  output files prefix
-  -d TMP, --tmp TMP           directory for temporary files
-  -l LIMIT, --limit LIMIT     GPU memory threshold for sequence processing
+  -h, --help                     show this help message and exit
+  -f FASTA, --fasta FASTA        Path to input fasta file
+  -t TEXT, --text TEXT           Path to input text file
+  -w WSIZE, --wsize WSIZE        Sliding window size
+  -p MOD, --mod MOD              Modulo used during parsing
+  -o OUTPUT, --output OUTPUT     Output files prefix
+  -d TMP_DIR, --tmp-dir TMP_DIR  Directory for temporary files
+  --threshold THRESHOLD          Fraction of free GPU memory to use per input batch (0 < f ≤ 1).
 ```
