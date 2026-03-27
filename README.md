@@ -4,7 +4,7 @@
 ## Installation
 1. Clone the repository
 ```
-git clone git@github.com:EddieFerro/gpuPFP.git
+git clone git@github.com:UserName/gpuPFP.git
 cd gpuPFP
 ```
 2. Set up the virtual environment
